@@ -1,11 +1,14 @@
 import time
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 import readline  #NOQA
 import sys
 import getpass  #NOQA
 import requests
 import json
+import re
+from tabulate import tabulate
 
+# TODO - add doctests
 requests.packages.urllib3.disable_warnings()
 
 url = 'https://localhost:8834'
@@ -15,6 +18,19 @@ username = 'cesar'
 password = 'test'
 # timeout = 3
 
+FILE_FORMATS = ['nessus', 'html', 'pdf', 'csv', 'db']
+
+CHAPTERS_DESC = {
+    'default': 'Nessus Results - ',
+    'vuln_hosts_summary': 'Executive Summary',
+    'vuln_by_host': 'By Host',
+    'vuln_by_plugin': 'By Vulnerability',
+    'compliance-exec': 'Compliance Executive Summary',
+    'compliance': 'Compliance Report',
+    'remediations': 'Remediations'}
+
+WIN_PATCH_REGEX = [re.compile(r'MS KB\d{6,7}'),
+                   re.compile(r'MS\d{2,2}-\d{3,3}')]
 
 """
 class Query(object):
@@ -146,20 +162,60 @@ def logout():
         print('Session does not exist.')
 
 
-def get_scan_list():
+def get_scan_list(folder_id=None, history_id=None):
     """
     Implements the 'list' method of the 'scans' resource.
     Returns a list of scans in json format.
+    folder_id: internal id of the folder
+    history_id: internal id of the historic data for the scans in the folder
     """
-    resource = 'scans'
     # TODO - Add exception when permissions are insufficient.
     # TODO - Add other exceptions
+    # TODO - Check that the docstring is correct
+    resource = 'scans'
+    data = json.dumps({'folder_id': folder_id, 'history_id': history_id})
     r = requests.get(build_url(url, resource), headers=build_headers(),
-                     verify=verify)
+                     data=data, verify=verify)
     return r.json()
 
 
-def extract_json_data(json_data, component):
+def get_scan_details(scan_id, history_id=None):
+    """
+    Implements the 'details' method of the 'scans' resource.
+    Returns the details of a particular scan in json format.
+    scan_id: internal id of the scan
+    history_id: internal id of the historic data for the scan
+    """
+    # TODO - Add exception when permissions are insufficient.
+    # TODO - Add other exceptions
+    resource = 'scans'
+    params = scan_id
+    data = json.dumps({'history_id': history_id})
+    r = requests.get(build_url(url, resource, params), headers=build_headers(),
+                     data=data, verify=verify)
+    return r.json()
+
+
+def get_host_details(scan_id, host_id, history_id=None):
+    """
+    Implements the 'host-details' method of the 'scans' resource.
+    Returns the details of a particular host in json format.
+    scan_id: internal id of the scan
+    host_id: internal id of the host
+    history_id: internal id of the historic data for the scan
+    """
+    # TODO - Add exception when permissions are insufficient.
+    # TODO - Add other exceptions
+    resource = 'scans'
+    params = '{}/hosts/{}'.format(scan_id, host_id)
+    data = json.dumps({'history_id': history_id})
+    r = requests.get(build_url(url, resource, params), headers=build_headers(),
+                     data=data, verify=verify)
+    return r.json()
+
+
+def extract_json_data(json_data, component, key_name):
+    # TODO - is this function really necessary? check alternatives
     """
     Takes a json object and returns a dictionary with the folder
     id as key and a tuple of the other data as values
@@ -169,15 +225,14 @@ def extract_json_data(json_data, component):
     if lst is None:
         return None
 
-    if component == 'folders' or component == 'scans':
-        field_list = [key for key in lst[0]]
-        NamedTuple = namedtuple(component.capitalize(), field_list)
+    field_list = [key for key in lst[0]]
+    NamedTuple = namedtuple(component.capitalize(), field_list)
 
-        for x in lst:
-            gen = (value for key, value in x.items())
-            d[x['id']] = NamedTuple._make(gen)
+    for x in lst:
+        gen = (value for key, value in x.items())
+        d[x[key_name]] = NamedTuple._make(gen)
 
-        return d
+    return d
 
 
 def scans_by_folder(folders_dict, scans_dict):
@@ -216,11 +271,11 @@ def print_folders_contents(d):
         else:
             for scan in scans:
                 print('  id: {}  name:{}'.format(scan.id, scan.name))
-    print()
+    print('')
 
 
-def post_export(scan_id, file_format='pdf', password=None,
-                chapters='vuln_hosts_summary', history_id=None):
+def post_export(scan_id, file_format='pdf', password=None, chapters=None,
+                history_id=None):
     """
     Implements the 'export' method of the 'scans' resource.
     Returns the file id.
@@ -232,8 +287,8 @@ def post_export(scan_id, file_format='pdf', password=None,
     resource = 'scans'
     params = '{}/export'.format(scan_id)
 
-    r = requests.post(build_url(url, resource, params),
-                      headers=build_headers(), data=export_info, verify=verify)
+    r = requests.post(build_url(url, resource, params), headers=build_headers(),
+                      data=export_info, verify=verify)
 
     if r.status_code == 200:
         file_id = r.json()['file']
@@ -282,36 +337,196 @@ def get_download(scan_id, file_id, path, filename):
         # TODO - add a try/except block to check for os exceptions
         with open(path+filename, 'wb') as f:
             f.write(r.content)
-        print('File downloaded as "{}"'.format(filename))
+        print("File downloaded as '{}'".format(filename))
 
 
-def batch_download(scans_by_folder_dict, folder_id):
-    chapters = ['vuln_hosts_summary', 'vuln_by_host', 'vuln_by_plugin']
-    chap_desc = ['Nessus Results by Host - Executive Summary',
-                 'Nessus Results by Host',
-                 'Nessus Results by Vulnerability']
-    file_format = 'pdf'
+def are_chapters(chapters):
+    """
+    Returns True if all the chapters are valid; False otherwise.
+    chapters: list of chapters.
+    """
+    for chapter in chapters:
+        for chapter2 in chapter.split(';'):
+            if chapter2 not in CHAPTERS_DESC:
+                return False
+    return True
 
-    folder_contents = list_folder_contents(scans_by_folder_dict, folder_id)
-    num_scans = len(folder_contents)
 
-    print('Preparing to download {} files for {} scans...'
+def fetch_chap_desc(chapter):
+    """
+    Returns a description for 'chapter'.  'Chapter' can be a single chapter
+    or multiple chapters separated with semicolons (;)
+    chapter: a valid chapter
+    """
+    lst = ['Nessus Results -']
+    for chap in chapter.split(';'):
+        lst.append(CHAPTERS_DESC[chap])
+    return ' '.join(lst)
+
+
+def batch_decorator(func):
+    def wrapper(*args, **kwargs):
+        for name, value in kwargs.items():
+            if name == 'file_format' and value not in FILE_FORMATS:
+                print('Invalid file format. Exiting...')
+                sys.exit()
+        else:
+            return func(*args, **kwargs)
+    return wrapper
+
+
+@batch_decorator
+def batch_download(scans_by_folder_dict, folders, file_format, path,
+                   chapters=None, password=None, history_id=None):
+    """
+    Downloads Nessus reports in batches.
+
+    scans_by_folder_dict: dict containing folders (keys) and scans (values)
+    folders: comma-separated string of folder id's
+    file_format: format of the files to be processed and downloaded
+    path: full or relative path of the directory to which download the file(s)
+    chapters: comma-separated list of chapters to include in the report. If
+    semicolon-delimited, a single file with the specified chapters will be
+    generated
+    password: password used to encrypt a 'db' file
+    """
+    d = defaultdict(list)
+
+    try:
+        # Remove spaces from the folder list
+        folders = folders.replace(' ', '').strip()
+
+        # Check that the list of folders is valid and is composed of integers
+        folder_set = set(int(x) for x in folders.split(','))
+    except (ValueError, AttributeError):
+        print("The 'folders' parameter must be a string of folder id's.")
+        sys.exit()
+
+    # Only execute chapter validation if the file format is either pdf or html
+    if file_format == 'pdf' or file_format == 'html':
+        chapters = chapters.replace(' ', '').strip()
+        chapters_list = chapters.split(',')
+
+        # Checks if chapter(s) is(are) valid
+        if are_chapters(chapters_list) is False:
+            print('Invalid chapters. Exiting...')
+            sys.exit()
+
+    # Populate the defaultdict with folder ids as keys and the folder's scans
+    # as values
+    for folder_id in folder_set:
+        d[folder_id].extend(list_folder_contents(scans_by_folder_dict,
+                                                 folder_id))
+
+    # Generate a list of scans to be processed.
+    scan_list = [scan for folder, scans in d.items() for scan in scans]
+    num_scans = len(scan_list)
+
+    print("Preparing to generate and download '{}' files for {} scans. This \
+might take a while depending on the size of the files..."
           .format(file_format, num_scans))
-    path = '/home/cesar/Projects/nessus/tests/'
-    print('Download directory: "{}"'.format(path))
+    print("Download directory: '{}'".format(path))
     count = 1
 
-    for scan in folder_contents:
-        print('Downloading scan results for "{}" scan... ({} of {})'.
+    for scan in scan_list:
+        print("--> Downloading scan results for '{}' scan... ({} of {})".
               format(scan.name, count, num_scans))
         count += 1
-        for chapter, desc in zip(chapters, chap_desc):
+        if file_format == 'pdf' or file_format == 'html':
+            for chapter in chapters_list:
+                file_id = post_export(scan.id, file_format=file_format,
+                                      chapters=chapter,
+                                      history_id=history_id)
+                filename = '{}_{}_{}.{}'.format(scan.name, file_id,
+                                                fetch_chap_desc(chapter),
+                                                file_format)
+                get_download(scan.id, file_id, path, filename)
+        else:
             file_id = post_export(scan.id, file_format=file_format,
-                                  password=None, chapters=chapter,
-                                  history_id=None)
-            filename = '{}_{}_{}.{}'.format(scan.name, file_id, desc,
-                                            file_format)
+                                  password=password, history_id=history_id)
+            filename = '{}_{}.{}'.format(scan.name, file_id, file_format)
             get_download(scan.id, file_id, path, filename)
+
+
+def operating_systems_report(scan_id):
+    scan_details, d = get_scan_details(scan_id), defaultdict(list)
+
+    for host in scan_details['hosts']:
+
+        host_details = get_host_details(scan_id, host['host_id'])
+
+        try:
+            key = host_details['info']['operating-system']
+        except KeyError:
+            d['Unidentified'].append(host['hostname'])
+        else:
+            d[key.replace('\n', ' | ')].append(host['hostname'])
+
+    return d
+
+
+def gen_missing_patches(scan_id):
+    """
+    Genetator that returns the missing operating system patch and the IP
+    address for each Windows system found in a given scan.
+    scan_id: the id of the scan to process.
+    """
+    scan_details = get_scan_details(scan_id)
+
+    for host in scan_details['hosts']:
+        host_details = get_host_details(scan_id, host['host_id'])
+        for vuln in host_details['vulnerabilities']:
+            for regex in WIN_PATCH_REGEX:
+                if regex.match(vuln['plugin_name']) is not None:
+                    # patch_id = vuln['plugin_id']
+                    patch_id = regex.match(vuln['plugin_name']).group()
+                    hostname = host['hostname']
+                    yield patch_id, hostname
+
+
+def build_missing_patches_report(scan_ids):
+    """
+    Takes a list of scan_ids and builds a defaultdict summarizing the
+    operating system patches missing on the Windows systems found in the scans
+    given as the parameter.
+    scan_ids: list of scans to process.
+    """
+    d = defaultdict(set)
+
+    for scan_id in scans:
+        for patch_id, hostname in gen_missing_patches(scan_id):
+            d[patch_id].add(hostname)
+    return d
+
+
+def print_missing_patches_report(scan_ids):
+    """
+    Takes a list of scan_ids and prints a report of missing operating system
+    patches on Windows systems found in the scans.
+    scan_ids: list of scans to process.
+    """
+    table = build_missing_patches_report(scan_ids)
+
+    print(tabulate(((k, len(v)) for k, v in table.items()),
+                   headers=['Patch ID', 'Hosts']))
+
+
+def prev_fetch_missing_patches(scan_id):
+    """
+    Returns a dictionary with Windows patch ids (keys) and the hosts that
+    have the patch missing (values).
+    scans_id: the id of the scan
+    """
+    d, scan_details = defaultdict(set), get_scan_details(scan_id)
+
+    for host in scan_details['hosts']:
+        host_details = get_host_details(scan_id, host['host_id'])
+        for vuln in host_details['vulnerabilities']:
+            for regex in WIN_PATCH_REGEX:
+                if regex.match(vuln['plugin_name']) is not None:
+                    key = (vuln['plugin_id'], scan_id)
+                    d[key].add(host['hostname'])
+    return d
 
 
 if __name__ == '__main__':
@@ -322,9 +537,44 @@ if __name__ == '__main__':
     get_download(47, id_file)
     """
     scan_metadata = get_scan_list()
-    folders_dict = extract_json_data(scan_metadata, 'folders')
-    scans_dict = extract_json_data(scan_metadata, 'scans')
+    folders_dict = extract_json_data(scan_metadata, 'folders', 'id')
+    scans_dict = extract_json_data(scan_metadata, 'scans', 'id')
+
+    """
+    for key, value in get_host_details(5, 2).items():
+        print(key, value)
+    """
+
+    """
+    for key, value in get_scan_details(5).items():
+        if key == 'hosts':
+            for vulnerability in value:
+                for key2, value2 in vulnerability.items():
+                    print('{}: {}'.format(key2, value2))
+                print()
+    """
+    # print(get_host_details(85, 3)['info'])
+    # print(operating_systems_report(85))
+
+    # print(missing_patches_report(5))
+
+    scans = [5, 130]
+    print_missing_patches_report(scans)
+
+    """
+    for os, hosts in operating_systems_report(85).items():
+        print('{} --> {}'.format(os, hosts))
+    """
+
     scans_by_folder_dict = scans_by_folder(folders_dict, scans_dict)
     print_folders_contents(scans_by_folder_dict)
-    batch_download(scans_by_folder_dict, 123)
+
+    """
+    path = '/home/cesar/Projects/nessus/tests/'
+    batch_download(scans_by_folder_dict, folders='123', file_format='pdf',
+                   chapters='vuln_hosts_summary',
+                   path=path)
+    """
+    # batch_download(scans_by_folder_dict, folders='123,3',
+    #                 file_format='nessus')
     logout()
