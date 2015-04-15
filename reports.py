@@ -1,5 +1,5 @@
 import time
-from collections import namedtuple, defaultdict
+import collections
 import readline  #NOQA
 import sys
 import getpass  #NOQA
@@ -31,6 +31,13 @@ CHAPTERS_DESC = {
 
 WIN_PATCH_REGEX = [re.compile(r'MS KB\d{6,7}'),
                    re.compile(r'MS\d{2,2}-\d{3,3}')]
+
+SEVERITY = {
+    4: 'Critical',
+    3: 'High',
+    2: 'Medium',
+    1: 'Low',
+    0: 'Info'}
 
 """
 class Query(object):
@@ -226,7 +233,7 @@ def extract_json_data(json_data, component, key_name):
         return None
 
     field_list = [key for key in lst[0]]
-    NamedTuple = namedtuple(component.capitalize(), field_list)
+    NamedTuple = collections.namedtuple(component.capitalize(), field_list)
 
     for x in lst:
         gen = (value for key, value in x.items())
@@ -390,7 +397,7 @@ def batch_download(scans_by_folder_dict, folders, file_format, path,
     generated
     password: password used to encrypt a 'db' file
     """
-    d = defaultdict(list)
+    d = collections.defaultdict(list)
 
     try:
         # Remove spaces from the folder list
@@ -449,7 +456,7 @@ might take a while depending on the size of the files..."
 
 
 def operating_systems_report(scan_id):
-    scan_details, d = get_scan_details(scan_id), defaultdict(list)
+    scan_details, d = get_scan_details(scan_id), collections.defaultdict(list)
 
     for host in scan_details['hosts']:
 
@@ -473,15 +480,13 @@ def gen_missing_patches(scan_id):
     """
     scan_details = get_scan_details(scan_id)
 
-    for host in scan_details['hosts']:
-        host_details = get_host_details(scan_id, host['host_id'])
-        for vuln in host_details['vulnerabilities']:
-            for regex in WIN_PATCH_REGEX:
-                if regex.match(vuln['plugin_name']) is not None:
-                    # patch_id = vuln['plugin_id']
-                    patch_id = regex.match(vuln['plugin_name']).group()
-                    hostname = host['hostname']
-                    yield patch_id, hostname
+    for vuln in scan_details['vulnerabilities']:
+        for regex in WIN_PATCH_REGEX:
+            if regex.match(vuln['plugin_name']) is not None:
+                patch_id = regex.match(vuln['plugin_name']).group()
+                plugin_id = vuln['plugin_id']
+                count, severity = vuln['count'], vuln['severity']
+                yield patch_id, plugin_id, SEVERITY[severity], count
 
 
 def build_missing_patches_report(scan_ids):
@@ -491,12 +496,62 @@ def build_missing_patches_report(scan_ids):
     given as the parameter.
     scan_ids: list of scans to process.
     """
-    d = defaultdict(set)
+    d = collections.defaultdict(list)
+    scan_patches = collections.defaultdict(list)
+    res = []
 
-    for scan_id in scans:
+    for scan_id in scan_ids:
+        for patch_id, plugin_id, severity, count in\
+                gen_missing_patches(scan_id):
+            d[patch_id] = [plugin_id, severity]
+            scan_patches[scan_id].append([patch_id, count])
+
+    for patch in d:
+        for scan_id in scan_ids:
+            patches, counts = zip(*scan_patches[scan_id])
+            if patch in patches:
+                i = patches.index(patch)
+                d[patch].extend([counts[i]])
+            else:
+                d[patch].extend([0])
+
+    for k, v in d.items():
+        temp = [k]
+        temp.extend(v)
+        res.append(temp)
+
+    headers = ['Patch ID', 'Plugin ID', 'Severity']
+    scan_names = [get_scan_details(scan_id)['info']['name'] for
+                  scan_id in scan_ids]
+    headers.extend(scan_names)
+
+    return res, headers
+
+    """
+    lst, res = [], {}
+
+    for scan_id in scan_ids:
+        d = defaultdict(set)
         for patch_id, hostname in gen_missing_patches(scan_id):
             d[patch_id].add(hostname)
-    return d
+        lst.append(d)
+
+    for x in lst:
+        for patch_id, hostname in x.items():
+            if patch_id not in res:
+                res[patch_id] = ['' for x in range(len(lst))]
+
+    for i, x in enumerate(lst):
+        for patch_id, hostnames in x.items():
+            res[patch_id][i] = len(hostnames)
+
+    headers = ['Patch ID']
+    scan_names = [get_scan_details(scan_id)['info']['name'] for
+                  scan_id in scan_ids]
+    headers.extend(scan_names)
+
+    return res, headers
+    """
 
 
 def print_missing_patches_report(scan_ids):
@@ -505,28 +560,26 @@ def print_missing_patches_report(scan_ids):
     patches on Windows systems found in the scans.
     scan_ids: list of scans to process.
     """
-    table = build_missing_patches_report(scan_ids)
-
-    print(tabulate(((k, len(v)) for k, v in table.items()),
-                   headers=['Patch ID', 'Hosts']))
+    table, headers = build_missing_patches_report(scan_ids)
+    print(tabulate([el for el in table], headers=headers))
 
 
-def prev_fetch_missing_patches(scan_id):
+def prev_gen_missing_patches(scan_id):
     """
-    Returns a dictionary with Windows patch ids (keys) and the hosts that
-    have the patch missing (values).
-    scans_id: the id of the scan
+    Genetator that returns the missing operating system patch and the IP
+    address for each Windows system found in a given scan.
+    scan_id: the id of the scan to process.
     """
-    d, scan_details = defaultdict(set), get_scan_details(scan_id)
+    scan_details = get_scan_details(scan_id)
 
     for host in scan_details['hosts']:
         host_details = get_host_details(scan_id, host['host_id'])
         for vuln in host_details['vulnerabilities']:
             for regex in WIN_PATCH_REGEX:
                 if regex.match(vuln['plugin_name']) is not None:
-                    key = (vuln['plugin_id'], scan_id)
-                    d[key].add(host['hostname'])
-    return d
+                    patch_id = regex.match(vuln['plugin_name']).group()
+                    hostname = host['hostname']
+                    yield patch_id, hostname
 
 
 if __name__ == '__main__':
@@ -559,6 +612,8 @@ if __name__ == '__main__':
     # print(missing_patches_report(5))
 
     scans = [5, 130]
+    # print(build_missing_patches_report(scans))
+    # print(get_scan_details(5)['info']['name'])
     print_missing_patches_report(scans)
 
     """
