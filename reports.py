@@ -1,5 +1,6 @@
 import time
 import collections
+import functools
 import readline  #NOQA
 import sys
 import getpass  #NOQA
@@ -7,6 +8,7 @@ import requests
 import json
 import re
 from tabulate import tabulate
+from operator import itemgetter
 
 # TODO - add doctests
 requests.packages.urllib3.disable_warnings()
@@ -87,6 +89,36 @@ class TooManyUsers(Exception):
 
 class InexistentSession(Exception):
     pass
+
+
+class memoized(object):
+    '''Decorator. Caches a function's return value each time it is called.
+    If called later with the same arguments, the cached value is returned
+    (not reevaluated).
+    '''
+    def __init__(self, func):
+        self.func = func
+        self.cache = {}
+
+    def __call__(self, *args):
+        if not isinstance(args, collections.Hashable):
+            # uncacheable. a list, for instance.
+            # better to not cache than blow up.
+            return self.func(*args)
+        if args in self.cache:
+            return self.cache[args]
+        else:
+            value = self.func(*args)
+            self.cache[args] = value
+            return value
+
+    def __repr__(self):
+        '''Return the function's docstring.'''
+        return self.func.__doc__
+
+    def __get__(self, obj, objtype):
+        '''Support instance methods.'''
+        return functools.partial(self.__call__, obj)
 
 
 def build_url(url, resource, params=None):
@@ -472,6 +504,39 @@ def operating_systems_report(scan_id):
     return d
 
 
+def get_plugin_attrs(plugin_id):
+    """
+    Implements the 'plugin_details' method of the 'plugins' resource.
+    Returns details of the plugin in json format.
+    """
+    resource = 'plugins'
+    params = 'plugin/{}'.format(plugin_id)
+
+    r = requests.get(build_url(url, resource, params),
+                     headers=build_headers(), verify=verify)
+
+    if r.status_code == 404:
+        print('Plugin does not exist.')
+    elif r.status_code == 200:
+        return r.json()
+
+
+@memoized
+def plugin_attrs(plugin_id, attr_name):
+    """
+    Returns a defaultdict of attributes (keys) and attribute values (values)
+    for a plugin, in a workable format.
+    """
+    # d = collections.defaultdict(list)
+
+    for el in get_plugin_attrs(plugin_id)['attributes']:
+        if el['attribute_name'] == attr_name:
+            return el['attribute_value']
+        # yield el['attribute_name'], el['attribute_value']
+        # d[el['attribute_name']].append(el['attribute_value'])
+    # return d
+
+
 def gen_missing_patches(scan_id):
     """
     Genetator that returns the missing operating system patch and the IP
@@ -486,7 +551,7 @@ def gen_missing_patches(scan_id):
                 patch_id = regex.match(vuln['plugin_name']).group()
                 plugin_id = vuln['plugin_id']
                 count, severity = vuln['count'], vuln['severity']
-                yield patch_id, plugin_id, SEVERITY[severity], count
+                yield patch_id, plugin_id, severity, count
 
 
 def build_missing_patches_report(scan_ids):
@@ -500,10 +565,20 @@ def build_missing_patches_report(scan_ids):
     scan_patches = collections.defaultdict(list)
     res = []
 
+    # field_list = ['plugin_id', 'severity_num', 'patch_id', 'patch_pub_date',
+    #              'severity_desc']
+    # field_list.extend(['scan_{}'.format(x) for x in range(len(scan_ids))])
+    # PatchInfo = collections.namedtuple('PatchInfo', field_list)
+
     for scan_id in scan_ids:
-        for patch_id, plugin_id, severity, count in\
-                gen_missing_patches(scan_id):
-            d[patch_id] = [plugin_id, severity]
+        for patch_id, plugin_id, severity, count\
+                in gen_missing_patches(scan_id):
+            """
+            d[patch_id] = PatchInfo(plugin_id=plugin_id, severity_num=severity,
+                                    patch_id=patch_id, patch_pub_date=None,
+                                    severity_desc=SEVERITY[severity], scan_
+            """
+            d[patch_id] = [plugin_id, severity, patch_id, SEVERITY[severity]]
             scan_patches[scan_id].append([patch_id, count])
 
     for patch in d:
@@ -513,45 +588,22 @@ def build_missing_patches_report(scan_ids):
                 i = patches.index(patch)
                 d[patch].extend([counts[i]])
             else:
-                d[patch].extend([0])
+                d[patch].extend([''])
 
     for k, v in d.items():
-        temp = [k]
-        temp.extend(v)
-        res.append(temp)
+        attr_name = 'patch_publication_date'
+        patch_pub_date = plugin_attrs(v[0], attr_name)
+        v.insert(3, patch_pub_date)
+        # temp = [k]
+        # temp.extend(v)
+        res.append(v)
 
-    headers = ['Patch ID', 'Plugin ID', 'Severity']
-    scan_names = [get_scan_details(scan_id)['info']['name'] for
-                  scan_id in scan_ids]
+    headers = ['Patch ID', 'Patch Pub. Date', 'Severity']
+    scan_names = [get_scan_details(scan_id)['info']['name']
+                  for scan_id in scan_ids]
     headers.extend(scan_names)
 
     return res, headers
-
-    """
-    lst, res = [], {}
-
-    for scan_id in scan_ids:
-        d = defaultdict(set)
-        for patch_id, hostname in gen_missing_patches(scan_id):
-            d[patch_id].add(hostname)
-        lst.append(d)
-
-    for x in lst:
-        for patch_id, hostname in x.items():
-            if patch_id not in res:
-                res[patch_id] = ['' for x in range(len(lst))]
-
-    for i, x in enumerate(lst):
-        for patch_id, hostnames in x.items():
-            res[patch_id][i] = len(hostnames)
-
-    headers = ['Patch ID']
-    scan_names = [get_scan_details(scan_id)['info']['name'] for
-                  scan_id in scan_ids]
-    headers.extend(scan_names)
-
-    return res, headers
-    """
 
 
 def print_missing_patches_report(scan_ids):
@@ -561,7 +613,8 @@ def print_missing_patches_report(scan_ids):
     scan_ids: list of scans to process.
     """
     table, headers = build_missing_patches_report(scan_ids)
-    print(tabulate([el for el in table], headers=headers))
+    sorted_table = sorted(table, key=itemgetter(1), reverse=True)
+    print(tabulate([el[2:] for el in sorted_table], headers=headers))
 
 
 def prev_gen_missing_patches(scan_id):
@@ -621,8 +674,10 @@ if __name__ == '__main__':
         print('{} --> {}'.format(os, hosts))
     """
 
+    """
     scans_by_folder_dict = scans_by_folder(folders_dict, scans_dict)
     print_folders_contents(scans_by_folder_dict)
+    """
 
     """
     path = '/home/cesar/Projects/nessus/tests/'
