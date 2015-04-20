@@ -13,13 +13,6 @@ from operator import itemgetter
 # TODO - add doctests
 requests.packages.urllib3.disable_warnings()
 
-url = 'https://localhost:8834'
-verify = False
-token = ''
-username = 'cesar'
-password = 'test'
-# timeout = 3
-
 FILE_FORMATS = ['nessus', 'html', 'pdf', 'csv', 'db']
 
 CHAPTERS_DESC = {
@@ -40,43 +33,6 @@ SEVERITY = {
     2: 'Medium',
     1: 'Low',
     0: 'Info'}
-
-"""
-class Query(object):
-    def __init__(self, url, resource, params, headers, verify=False,
-                 data=None, token=''):
-        self.url = url
-        self.resource = resource
-        self.params = params
-        self.headers = headers
-        self.verify = verify
-        self.data = data
-
-    def getMethod(self):
-        return self.method
-
-    def getUrl(self):
-        return self.url
-
-    def getResource(self):
-        return self.resource
-
-    def getParams(self):
-        return self.params
-
-    def getHeaders(self):
-        return self.headers
-
-    def getVerify(self):
-        return self.verify
-
-    def getData(self):
-        return self.data
-
-    def build_headers():
-        return {'X-Cookie': 'token={}'.format(token),
-                'content-type': 'application/json'}
-"""
 
 
 class InvalidUserOrPass(Exception):
@@ -124,6 +80,7 @@ class memoized(object):
 def build_url(url, resource, params=None):
     # TODO - Deal with the invalid certificate exception, bad and malformed urls
     # and other exceptions
+
     if params is not None:
         full_url = '{}/{}/{}'.format(url, resource, params)
     else:
@@ -144,7 +101,7 @@ port for errors. Exiting...')
 
 def build_headers():
     # TODO - check if it is a good idea for token to be a global variable
-    global token
+    # global token
 
     return {'X-Cookie': 'token={}'.format(token),
             'content-type': 'application/json'}
@@ -636,55 +593,4 @@ def prev_gen_missing_patches(scan_id):
 
 
 if __name__ == '__main__':
-    token = login()
-    """
-    id_file = post_export(47)
-    print(get_export_status(47, id_file))
-    get_download(47, id_file)
-    """
-    scan_metadata = get_scan_list()
-    folders_dict = extract_json_data(scan_metadata, 'folders', 'id')
-    scans_dict = extract_json_data(scan_metadata, 'scans', 'id')
-
-    """
-    for key, value in get_host_details(5, 2).items():
-        print(key, value)
-    """
-
-    """
-    for key, value in get_scan_details(5).items():
-        if key == 'hosts':
-            for vulnerability in value:
-                for key2, value2 in vulnerability.items():
-                    print('{}: {}'.format(key2, value2))
-                print()
-    """
-    # print(get_host_details(85, 3)['info'])
-    # print(operating_systems_report(85))
-
-    # print(missing_patches_report(5))
-
-    scans = [5, 130]
-    # print(build_missing_patches_report(scans))
-    # print(get_scan_details(5)['info']['name'])
-    print_missing_patches_report(scans)
-
-    """
-    for os, hosts in operating_systems_report(85).items():
-        print('{} --> {}'.format(os, hosts))
-    """
-
-    """
-    scans_by_folder_dict = scans_by_folder(folders_dict, scans_dict)
-    print_folders_contents(scans_by_folder_dict)
-    """
-
-    """
-    path = '/home/cesar/Projects/nessus/tests/'
-    batch_download(scans_by_folder_dict, folders='123', file_format='pdf',
-                   chapters='vuln_hosts_summary',
-                   path=path)
-    """
-    # batch_download(scans_by_folder_dict, folders='123,3',
-    #                 file_format='nessus')
-    logout()
+    pass
