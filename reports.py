@@ -9,6 +9,7 @@ import json
 import re
 from tabulate import tabulate
 from operator import itemgetter
+from config import url, username, password, verify, token
 
 # TODO - add doctests
 requests.packages.urllib3.disable_warnings()
@@ -44,6 +45,10 @@ class TooManyUsers(Exception):
 
 
 class InexistentSession(Exception):
+    pass
+
+
+class InsufficientPriv(Exception):
     pass
 
 
@@ -100,9 +105,9 @@ port for errors. Exiting...')
 
 
 def build_headers():
-    # TODO - check if it is a good idea for token to be a global variable
-    # global token
-
+    """
+    Returns the headers.
+    """
     return {'X-Cookie': 'token={}'.format(token),
             'content-type': 'application/json'}
 
@@ -158,23 +163,6 @@ def logout():
         print('Session does not exist.')
 
 
-def get_scan_list(folder_id=None, history_id=None):
-    """
-    Implements the 'list' method of the 'scans' resource.
-    Returns a list of scans in json format.
-    folder_id: internal id of the folder
-    history_id: internal id of the historic data for the scans in the folder
-    """
-    # TODO - Add exception when permissions are insufficient.
-    # TODO - Add other exceptions
-    # TODO - Check that the docstring is correct
-    resource = 'scans'
-    data = json.dumps({'folder_id': folder_id, 'history_id': history_id})
-    r = requests.get(build_url(url, resource), headers=build_headers(),
-                     data=data, verify=verify)
-    return r.json()
-
-
 def get_scan_details(scan_id, history_id=None):
     """
     Implements the 'details' method of the 'scans' resource.
@@ -210,62 +198,127 @@ def get_host_details(scan_id, host_id, history_id=None):
     return r.json()
 
 
-def extract_json_data(json_data, component, key_name):
-    # TODO - is this function really necessary? check alternatives
+def get_scan_list(folder_id=None, last_modification_date=None):
     """
-    Takes a json object and returns a dictionary with the folder
-    id as key and a tuple of the other data as values
+    Implements the 'list' method of the 'scans' resource.
+    Returns a list of scans in json format.
+    folder_id: internal id of the folder
+    last_modification_date: last modification date of the folder
     """
-    d, lst = {}, json_data[component]
+    # TODO - Add exception when permissions are insufficient.
+    # TODO - Add other exceptions
+    # TODO - Check that the docstring is correct
+    # TODO - folder_id not working, function spits out all folder contents
+    resource = 'scans'
+    data = json.dumps({'folder_id': folder_id,
+                       'last_modification_date': last_modification_date})
+    r = requests.get(build_url(url, resource), headers=build_headers(),
+                     data=data, verify=verify)
 
-    if lst is None:
-        return None
-
-    field_list = [key for key in lst[0]]
-    NamedTuple = collections.namedtuple(component.capitalize(), field_list)
-
-    for x in lst:
-        gen = (value for key, value in x.items())
-        d[x[key_name]] = NamedTuple._make(gen)
-
-    return d
+    return r.json()
 
 
-def scans_by_folder(folders_dict, scans_dict):
+def get_folder_list():
     """
+    Implements the 'list' method of the 'folders' resource.
+    Returns a list of folders in json format.
+    """
+    resource = 'folders'
+    r = requests.get(build_url(url, resource), headers=build_headers(),
+                     verify=verify)
+    if r.status_code == 403:
+        raise InsufficientPriv('User does not have sufficient privileges to \
+access this resource')
+
+    return r.json()['folders']
+
+
+def fetch_folders(json_data, folder_id=None):
+    d, folders = {}, get_folder_list()
+    field_list = [k for k in folders[0]]
+    Folder = collections.namedtuple('Folder', field_list)
+
+    for el in folders:
+        gen = (v for k, v in el.items())
+        d[el['id']] = Folder._make(gen)
+
+    if folder_id is None:
+        return d
+    elif isinstance(folder_id, int):
+        try:
+            d[folder_id]
+        except KeyError:
+            print('No folder with that id.')
+            raise
+        else:
+            return {folder_id: d[folder_id]}
+    else:
+        raise ValueError('folder_id must be int or None.')
+
+
+def process_scans(folder_id=None, last_modification_date=None):
+    d, json_data = collections.defaultdict(list), get_scan_list()
+    scans, folders = json_data['scans'], json_data['folders']
+
+    field_list = [k for k in scans[0]]
+    Scan = collections.namedtuple('Scan', field_list)
+
+    for el in scans:
+        gen = [v for k, v in el.items()]
+        d[el['folder_id']].append(Scan._make(gen))
+
+    for folder in folders:
+        if folder['id'] not in d:
+            d[folder['id']].append(None)
+
+    if folder_id is None:
+        return d
+    elif folder_id not in d:
+        print('folder_id not found.')
+        raise KeyError
+    else:
+        return {folder_id: d[folder_id]}
+
+
+"""
+def scans_by_folder_prev(folder_id=None, last_modification_date=None):
+    # TODO - Add functionality to choose folder
     Generates a dictionary of folders and scans; folder_id is the key, value
     is a list of namedtuples representing scans.
 
     folders_dict: a dictionary of folders
     scans_dict: a dicitonary of scans
-    """
-    d = {}
 
-    for folder_id, fields in folders_dict.items():
-        d[folder_id] = []
+    d, scan_metadata = {}, get_scan_list(folder_id, last_modification_date)
+    folders_dict = fetch_folders(scan_metadata, folder_id)
+    scans_dict = extract_json_data(scan_metadata, 'scans', 'id')
+
+    for folder, fields in folders_dict.items():
+        d[folder] = [fields.name]
         if scans_dict is not None:
             for scan_id, fields2 in scans_dict.items():
-                if folder_id == fields2.folder_id:
-                    d[folder_id].append(fields2)
+                if folder == fields2.folder_id:
+                    d[folder].append(fields2)
     return d
+"""
 
 
-def list_folder_contents(folders_scans_dict, folder_id):
-    return folders_scans_dict[folder_id]
-
-
-def print_folders_contents(d):
+def print_folders_contents(folder_id=None, last_modification_date=None):
     """
     Prints a lists of folders and their scans.
     d: dictionary containing folders as keys and scan named tuples as values.
     """
-    for folder_id, scans in d.items():
-        print('\n(+) Folder name: {} - id: {}'.
-              format(folders_dict[folder_id].name, folder_id))
-        if scans == []:
-            print('   Folder is empty.\n')
-        else:
-            for scan in scans:
+    scans_dict = process_scans(folder_id, last_modification_date)
+    folders = get_folder_list()
+    folder_names = dict([(folder['id'], folder['name']) for folder in folders])
+
+    for folder_id, scans in sorted(scans_dict.items()):
+        print('\n(+) Folder name: {} - id: {}'.format(folder_names[folder_id],
+                                                      folder_id))
+        for scan in scans:
+            if scan is None:
+                print('  Folder is empty.\n')
+            else:
                 print('  id: {}  name:{}'.format(scan.id, scan.name))
     print('')
 
@@ -372,13 +425,12 @@ def batch_decorator(func):
 
 
 @batch_decorator
-def batch_download(scans_by_folder_dict, folders, file_format, path,
-                   chapters=None, password=None, history_id=None):
+def batch_download(folders, file_format, path, chapters=None, password=None,
+                   history_id=None):
     """
     Downloads Nessus reports in batches.
 
-    scans_by_folder_dict: dict containing folders (keys) and scans (values)
-    folders: comma-separated string of folder id's
+    folders: list of folder id's
     file_format: format of the files to be processed and downloaded
     path: full or relative path of the directory to which download the file(s)
     chapters: comma-separated list of chapters to include in the report. If
@@ -386,17 +438,6 @@ def batch_download(scans_by_folder_dict, folders, file_format, path,
     generated
     password: password used to encrypt a 'db' file
     """
-    d = collections.defaultdict(list)
-
-    try:
-        # Remove spaces from the folder list
-        folders = folders.replace(' ', '').strip()
-
-        # Check that the list of folders is valid and is composed of integers
-        folder_set = set(int(x) for x in folders.split(','))
-    except (ValueError, AttributeError):
-        print("The 'folders' parameter must be a string of folder id's.")
-        sys.exit()
 
     # Only execute chapter validation if the file format is either pdf or html
     if file_format == 'pdf' or file_format == 'html':
@@ -408,14 +449,8 @@ def batch_download(scans_by_folder_dict, folders, file_format, path,
             print('Invalid chapters. Exiting...')
             sys.exit()
 
-    # Populate the defaultdict with folder ids as keys and the folder's scans
-    # as values
-    for folder_id in folder_set:
-        d[folder_id].extend(list_folder_contents(scans_by_folder_dict,
-                                                 folder_id))
-
-    # Generate a list of scans to be processed.
-    scan_list = [scan for folder, scans in d.items() for scan in scans]
+    scan_list = [scan for folder_id in folders for folder, scans
+                 in process_scans(folder_id).items() for scan in scans]
     num_scans = len(scan_list)
 
     print("Preparing to generate and download '{}' files for {} scans. This \
