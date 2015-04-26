@@ -45,7 +45,6 @@ plugin_cache = percache.Cache('tmp/plugin-attributes')
 
 # Clear any entries older than 15 days from the plugin cache
 plugin_cache.clear(maxage=60*60*24*15)
-print(plugin_cache.stats())
 
 
 class InvalidUserOrPass(Exception):
