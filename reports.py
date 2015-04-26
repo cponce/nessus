@@ -7,12 +7,12 @@ import getpass  #NOQA
 import requests
 import json
 import re
-from tabulate import tabulate
+import percache
 from operator import itemgetter
+from tabulate import tabulate
 from config import url, username, password, verify, token
 
 # TODO - add doctests
-requests.packages.urllib3.disable_warnings()
 
 FILE_FORMATS = ['nessus', 'html', 'pdf', 'csv', 'db']
 
@@ -34,6 +34,18 @@ SEVERITY = {
     2: 'Medium',
     1: 'Low',
     0: 'Info'}
+
+# Disable warning for SSL certificates that cannot be trusted
+# (for example, self-signed certs)
+# TODO - handle this exception as one would handle it when using a browser
+requests.packages.urllib3.disable_warnings()
+
+# Cache for plugin attributes
+plugin_cache = percache.Cache('tmp/plugin-attributes')
+
+# Clear any entries older than 15 days from the plugin cache
+plugin_cache.clear(maxage=60*60*24*15)
+print(plugin_cache.stats())
 
 
 class InvalidUserOrPass(Exception):
@@ -280,29 +292,6 @@ def process_scans(folder_id=None, last_modification_date=None):
         return {folder_id: d[folder_id]}
 
 
-"""
-def scans_by_folder_prev(folder_id=None, last_modification_date=None):
-    # TODO - Add functionality to choose folder
-    Generates a dictionary of folders and scans; folder_id is the key, value
-    is a list of namedtuples representing scans.
-
-    folders_dict: a dictionary of folders
-    scans_dict: a dicitonary of scans
-
-    d, scan_metadata = {}, get_scan_list(folder_id, last_modification_date)
-    folders_dict = fetch_folders(scan_metadata, folder_id)
-    scans_dict = extract_json_data(scan_metadata, 'scans', 'id')
-
-    for folder, fields in folders_dict.items():
-        d[folder] = [fields.name]
-        if scans_dict is not None:
-            for scan_id, fields2 in scans_dict.items():
-                if folder == fields2.folder_id:
-                    d[folder].append(fields2)
-    return d
-"""
-
-
 def print_folders_contents(folder_id=None, last_modification_date=None):
     """
     Prints a lists of folders and their scans.
@@ -341,7 +330,7 @@ def post_export(scan_id, file_format='pdf', password=None, chapters=None,
 
     if r.status_code == 200:
         file_id = r.json()['file']
-        while get_export_status(scan_id, file_id) is False:
+        while not get_export_status(scan_id, file_id):
             time.sleep(2)
     elif r.status_code == 400:
         print('A required parameter is missing.')
@@ -382,6 +371,7 @@ def get_download(scan_id, file_id, path, filename):
 
     if r.status_code == 404:
         print('File does not exist.')
+        sys.exit()
     elif r.status_code == 200:
         # TODO - add a try/except block to check for os exceptions
         with open(path+filename, 'wb') as f:
@@ -415,8 +405,8 @@ def fetch_chap_desc(chapter):
 
 def batch_decorator(func):
     def wrapper(*args, **kwargs):
-        for name, value in kwargs.items():
-            if name == 'file_format' and value not in FILE_FORMATS:
+        for keyword, value in kwargs.items():
+            if keyword == 'file_format' and value not in FILE_FORMATS:
                 print('Invalid file format. Exiting...')
                 sys.exit()
         else:
@@ -438,6 +428,13 @@ def batch_download(folders, file_format, path, chapters=None, password=None,
     generated
     password: password used to encrypt a 'db' file
     """
+    def get_scans_to_download(folders):
+        res = []
+        for folder_id in folders:
+            for folder, scans in process_scans(folder_id).items():
+                for scan in scans:
+                    res.append(scan)
+        return res
 
     # Only execute chapter validation if the file format is either pdf or html
     if file_format == 'pdf' or file_format == 'html':
@@ -445,12 +442,11 @@ def batch_download(folders, file_format, path, chapters=None, password=None,
         chapters_list = chapters.split(',')
 
         # Checks if chapter(s) is(are) valid
-        if are_chapters(chapters_list) is False:
+        if not are_chapters(chapters_list):
             print('Invalid chapters. Exiting...')
             sys.exit()
 
-    scan_list = [scan for folder_id in folders for folder, scans
-                 in process_scans(folder_id).items() for scan in scans]
+    scan_list = get_scans_to_download(folders)
     num_scans = len(scan_list)
 
     print("Preparing to generate and download '{}' files for {} scans. This \
@@ -496,6 +492,7 @@ def operating_systems_report(scan_id):
     return d
 
 
+@plugin_cache
 def get_plugin_attrs(plugin_id):
     """
     Implements the 'plugin_details' method of the 'plugins' resource.
@@ -513,20 +510,14 @@ def get_plugin_attrs(plugin_id):
         return r.json()
 
 
-@memoized
 def plugin_attrs(plugin_id, attr_name):
     """
     Returns a defaultdict of attributes (keys) and attribute values (values)
     for a plugin, in a workable format.
     """
-    # d = collections.defaultdict(list)
-
     for el in get_plugin_attrs(plugin_id)['attributes']:
         if el['attribute_name'] == attr_name:
             return el['attribute_value']
-        # yield el['attribute_name'], el['attribute_value']
-        # d[el['attribute_name']].append(el['attribute_value'])
-    # return d
 
 
 def gen_missing_patches(scan_id):
@@ -549,27 +540,17 @@ def gen_missing_patches(scan_id):
 def build_missing_patches_report(scan_ids):
     """
     Takes a list of scan_ids and builds a defaultdict summarizing the
-    operating system patches missing on the Windows systems found in the scans
-    given as the parameter.
+    operating system patches missing on the Windows systems found in the scan
+    list.
     scan_ids: list of scans to process.
     """
     d = collections.defaultdict(list)
     scan_patches = collections.defaultdict(list)
     res = []
 
-    # field_list = ['plugin_id', 'severity_num', 'patch_id', 'patch_pub_date',
-    #              'severity_desc']
-    # field_list.extend(['scan_{}'.format(x) for x in range(len(scan_ids))])
-    # PatchInfo = collections.namedtuple('PatchInfo', field_list)
-
     for scan_id in scan_ids:
         for patch_id, plugin_id, severity, count\
                 in gen_missing_patches(scan_id):
-            """
-            d[patch_id] = PatchInfo(plugin_id=plugin_id, severity_num=severity,
-                                    patch_id=patch_id, patch_pub_date=None,
-                                    severity_desc=SEVERITY[severity], scan_
-            """
             d[patch_id] = [plugin_id, severity, patch_id, SEVERITY[severity]]
             scan_patches[scan_id].append([patch_id, count])
 
@@ -586,8 +567,6 @@ def build_missing_patches_report(scan_ids):
         attr_name = 'patch_publication_date'
         patch_pub_date = plugin_attrs(v[0], attr_name)
         v.insert(3, patch_pub_date)
-        # temp = [k]
-        # temp.extend(v)
         res.append(v)
 
     headers = ['Patch ID', 'Patch Pub. Date', 'Severity']
@@ -607,24 +586,6 @@ def print_missing_patches_report(scan_ids):
     table, headers = build_missing_patches_report(scan_ids)
     sorted_table = sorted(table, key=itemgetter(1), reverse=True)
     print(tabulate([el[2:] for el in sorted_table], headers=headers))
-
-
-def prev_gen_missing_patches(scan_id):
-    """
-    Genetator that returns the missing operating system patch and the IP
-    address for each Windows system found in a given scan.
-    scan_id: the id of the scan to process.
-    """
-    scan_details = get_scan_details(scan_id)
-
-    for host in scan_details['hosts']:
-        host_details = get_host_details(scan_id, host['host_id'])
-        for vuln in host_details['vulnerabilities']:
-            for regex in WIN_PATCH_REGEX:
-                if regex.match(vuln['plugin_name']) is not None:
-                    patch_id = regex.match(vuln['plugin_name']).group()
-                    hostname = host['hostname']
-                    yield patch_id, hostname
 
 
 if __name__ == '__main__':
