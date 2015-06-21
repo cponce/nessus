@@ -4,12 +4,17 @@ import functools
 import readline  #NOQA
 import sys
 import getpass  #NOQA
-import requests
 import json
 import re
 import percache
 from operator import itemgetter
 from tabulate import tabulate
+from datetime import datetime
+
+import requests
+# from munch import munchify, unmunchify  # NOQA
+import munch
+
 from config import url, username, password, verify, token
 
 # TODO - add doctests
@@ -17,7 +22,6 @@ from config import url, username, password, verify, token
 FILE_FORMATS = ['nessus', 'html', 'pdf', 'csv', 'db']
 
 CHAPTERS_DESC = {
-    'default': 'Nessus Results - ',
     'vuln_hosts_summary': 'Executive Summary',
     'vuln_by_host': 'By Host',
     'vuln_by_plugin': 'By Vulnerability',
@@ -45,10 +49,6 @@ plugin_cache = percache.Cache('tmp/plugin-attributes')
 
 # Clear any entries older than 15 days from the plugin cache
 plugin_cache.clear(maxage=60*60*24*15)
-
-
-class InvalidUserOrPass(Exception):
-    pass
 
 
 class TooManyUsers(Exception):
@@ -146,10 +146,10 @@ def login():
                 print("Logged in as '{}'.".format(username))
                 return r.json()['token']
             elif r.status_code == 400 or r.status_code == 401:
-                raise InvalidUserOrPass
+                raise ValueError
             elif r.status_code == 500:
                 raise TooManyUsers
-        except InvalidUserOrPass:
+        except ValueError:
             print('Invalid username or password. Please try again.')
             continue
         except TooManyUsers:
@@ -218,8 +218,6 @@ def get_scan_list(folder_id=None, last_modification_date=None):
     """
     # TODO - Add exception when permissions are insufficient.
     # TODO - Add other exceptions
-    # TODO - Check that the docstring is correct
-    # TODO - folder_id not working, function spits out all folder contents
     resource = 'scans'
     data = json.dumps({'folder_id': folder_id,
                        'last_modification_date': last_modification_date})
@@ -238,10 +236,10 @@ def get_folder_list():
     r = requests.get(build_url(url, resource), headers=build_headers(),
                      verify=verify)
     if r.status_code == 403:
-        raise InsufficientPriv('User does not have sufficient privileges to \
-access this resource')
+        raise InsufficientPriv('The user does not have sufficient privileges \
+to access this resource')
 
-    return r.json()['folders']
+    return r.json()
 
 
 def fetch_folders(json_data, folder_id=None):
@@ -267,6 +265,116 @@ def fetch_folders(json_data, folder_id=None):
         raise ValueError('folder_id must be int or None.')
 
 
+class Scan(object):
+    def __init__(self, **entries):
+        self.__dict__.update(entries)
+
+    """
+    def __init__(self, control, creation_date, enabled, folder_id, id,
+                 last_modification_date, name, owner, read, rrules, shared,
+                 starttime, status, timezone, user_permissions, uuid):
+        self.control = control
+        self.creation_date = creation_date
+        self.enabled = enabled
+        self.folder_id = folder_id
+        self.id = id
+        self.last_modification_date = last_modification_date
+        self.name = name
+        self.owner = owner
+        self.read = read
+        self.rrules = rrules
+        self.shared = shared
+        self.starttime = starttime
+        self.status = status
+        self.timezone = timezone
+        self.user_permissions = user_permissions
+        self.uuid = uuid
+        self.hosts = []
+    """
+
+
+class Folder(object):
+    def __init__(self, custom, default_tag, id, name, type, unread_count):
+        self.custom = custom
+        self.default_tag = default_tag
+        self.id = id
+        self.name = name
+        self.type = type
+        self.unread_count = unread_count
+
+
+def sanitize_bad_entries(func):
+    def wrapper(*args, **kwargs):
+        new_kwargs = {}
+        for k, v in kwargs.items():
+            if isinstance(v, dict):
+                new_value = {}
+                for k2, v2 in v.items():
+                    if '-' in k2:
+                        new_value[k2.replace('-', '_')] = v2
+                    else:
+                        new_value[k2] = v2
+                new_kwargs[k] = munch.munchify(new_value)
+            else:
+                new_kwargs[k] = v
+        return func(*args, **new_kwargs)
+    return wrapper
+
+
+class Host(object):
+    @sanitize_bad_entries
+    def __init__(self, scan_id, host_id, **entries):
+        self.scan_id = scan_id
+        self.host_id = host_id
+        self.plugin_outputs_list = []
+        self.__dict__.update(munch.munchify(entries))
+
+    def __repr__(self):
+        return "Host information:\n  Hostname: {}\n  IP Address: {}\n  \
+Operating System: {}".\
+            format(self.info.netbios_name, self.info.host_ip,
+                   self.info.operating_system)
+
+    def plugin_outputs(self):
+        for el in self.vulnerabilities:
+            json_data = get_plugin_output(self.scan_id, self.host_id,
+                                          el.plugin_id)
+            self.plugin_outputs_list.append(PluginOutput(**json_data))
+
+    """
+    def __init__(self, critical, high, host_id, host_index, hostname, info, low,
+                 medium, numchecksconsidered, progress, scanprogresscurrent,
+                 scanprogresstotal, score, severity, severitycount,
+                 totalchecksconsidered):
+        self.critical = critical
+        self.high = high
+        self.host_id = host_id
+        self.host_index = host_index
+        self.hostname = hostname
+        self.info = info
+        self.low = low
+        self.medium = medium
+        self.numchecksconsidered = numchecksconsidered
+        self.progress = progress
+        self.scanprogresscurrent = scanprogresscurrent
+        self.scanprogresstotal = scanprogresstotal
+        self.score = score
+        self.serverity = severity
+        self.serveritycount = severitycount
+        self.totalchecksconsidered = totalchecksconsidered
+    """
+
+
+class PluginOutput(object):
+    @sanitize_bad_entries
+    def __init__(self, **entries):
+        self.__dict__.update(munch.munchify(entries))
+
+
+def deserializer(json_data):
+    return json.loads(json.dumps(json_data, sort_keys=True))
+
+
 def process_scans(folder_id=None, last_modification_date=None):
     d, json_data = collections.defaultdict(list), get_scan_list()
     scans, folders = json_data['scans'], json_data['folders']
@@ -285,8 +393,7 @@ def process_scans(folder_id=None, last_modification_date=None):
     if folder_id is None:
         return d
     elif folder_id not in d:
-        print('folder_id not found.')
-        raise KeyError
+        raise KeyError('folder_id not found.')
     else:
         return {folder_id: d[folder_id]}
 
@@ -297,7 +404,7 @@ def print_folders_contents(folder_id=None, last_modification_date=None):
     d: dictionary containing folders as keys and scan named tuples as values.
     """
     scans_dict = process_scans(folder_id, last_modification_date)
-    folders = get_folder_list()
+    folders = get_folder_list()["folders"]
     folder_names = dict([(folder['id'], folder['name']) for folder in folders])
 
     for folder_id, scans in sorted(scans_dict.items()):
@@ -330,7 +437,7 @@ def post_export(scan_id, file_format='pdf', password=None, chapters=None,
     if r.status_code == 200:
         file_id = r.json()['file']
         while not get_export_status(scan_id, file_id):
-            time.sleep(2)
+            time.sleep(0.3)
     elif r.status_code == 400:
         print('A required parameter is missing.')
         sys.exit()
@@ -373,21 +480,10 @@ def get_download(scan_id, file_id, path, filename):
         sys.exit()
     elif r.status_code == 200:
         # TODO - add a try/except block to check for os exceptions
+        # TODO - add a finally statement to close the file
         with open(path+filename, 'wb') as f:
             f.write(r.content)
-        print("File downloaded as '{}'".format(filename))
-
-
-def are_chapters(chapters):
-    """
-    Returns True if all the chapters are valid; False otherwise.
-    chapters: list of chapters.
-    """
-    for chapter in chapters:
-        for chapter2 in chapter.split(';'):
-            if chapter2 not in CHAPTERS_DESC:
-                return False
-    return True
+        print("   File downloaded as '{}'".format(filename))
 
 
 def fetch_chap_desc(chapter):
@@ -396,20 +492,22 @@ def fetch_chap_desc(chapter):
     or multiple chapters separated with semicolons (;)
     chapter: a valid chapter
     """
-    lst = ['Nessus Results -']
+    res = ['Nessus Results']
     for chap in chapter.split(';'):
-        lst.append(CHAPTERS_DESC[chap])
-    return ' '.join(lst)
+        res.append(CHAPTERS_DESC[chap])
+    return ' - '.join(res)
 
 
 def batch_decorator(func):
     def wrapper(*args, **kwargs):
-        for keyword, value in kwargs.items():
-            if keyword == 'file_format' and value not in FILE_FORMATS:
-                print('Invalid file format. Exiting...')
-                sys.exit()
-        else:
-            return func(*args, **kwargs)
+        if kwargs['file_format'] not in FILE_FORMATS:
+            raise ValueError('Invalid file format.')
+        elif kwargs['file_format'] == 'pdf' or kwargs['file_format'] == 'html':
+            for chapter in kwargs['chapters']:
+                for x in chapter.split(';'):
+                    if x not in CHAPTERS_DESC:
+                        raise ValueError('Invalid chapter.')
+        return func(*args, **kwargs)
     return wrapper
 
 
@@ -420,13 +518,13 @@ def batch_download(folders, file_format, path, chapters=None, password=None,
     Downloads Nessus reports in batches.
 
     folders: list of folder id's
-    file_format: format of the files to be processed and downloaded
+    file_format: a list of file formats to be processed.
     path: full or relative path of the directory to which download the file(s)
-    chapters: comma-separated list of chapters to include in the report. If
-    semicolon-delimited, a single file with the specified chapters will be
-    generated
+    chapters: list of chapters to include in the report.
     password: password used to encrypt a 'db' file
     """
+    # TODO - Add functionality to generate reports in multiple file formats
+    # TODO - Is this helper function really necessary?
     def get_scans_to_download(folders):
         res = []
         for folder_id in folders:
@@ -435,31 +533,21 @@ def batch_download(folders, file_format, path, chapters=None, password=None,
                     res.append(scan)
         return res
 
-    # Only execute chapter validation if the file format is either pdf or html
-    if file_format == 'pdf' or file_format == 'html':
-        chapters = chapters.replace(' ', '').strip()
-        chapters_list = chapters.split(',')
-
-        # Checks if chapter(s) is(are) valid
-        if not are_chapters(chapters_list):
-            print('Invalid chapters. Exiting...')
-            sys.exit()
-
     scan_list = get_scans_to_download(folders)
     num_scans = len(scan_list)
 
     print("Preparing to generate and download '{}' files for {} scans. This \
 might take a while depending on the size of the files..."
           .format(file_format, num_scans))
-    print("Download directory: '{}'".format(path))
+    print("Download directory: '{}''\n".format(path))
     count = 1
 
     for scan in scan_list:
-        print("--> Downloading scan results for '{}' scan... ({} of {})".
+        print("Downloading scan results for '{}' scan... ({} of {})".
               format(scan.name, count, num_scans))
         count += 1
         if file_format == 'pdf' or file_format == 'html':
-            for chapter in chapters_list:
+            for chapter in chapters:
                 file_id = post_export(scan.id, file_format=file_format,
                                       chapters=chapter,
                                       history_id=history_id)
@@ -478,16 +566,13 @@ def operating_systems_report(scan_id):
     scan_details, d = get_scan_details(scan_id), collections.defaultdict(list)
 
     for host in scan_details['hosts']:
-
         host_details = get_host_details(scan_id, host['host_id'])
-
         try:
             key = host_details['info']['operating-system']
         except KeyError:
             d['Unidentified'].append(host['hostname'])
         else:
             d[key.replace('\n', ' | ')].append(host['hostname'])
-
     return d
 
 
@@ -504,27 +589,51 @@ def get_plugin_attrs(plugin_id):
                      headers=build_headers(), verify=verify)
 
     if r.status_code == 404:
-        print('Plugin does not exist.')
+        raise ValueError('Plugin does not exist.')
     elif r.status_code == 200:
         return r.json()
 
 
-def plugin_attrs(plugin_id, attr_name):
+def plugin_attrs(plugin_id, attr_name=''):
     """
-    Returns a defaultdict of attributes (keys) and attribute values (values)
-    for a plugin, in a workable format.
+    Returns the value corresponding to the given attribute name (`attr_name`).
+    If `attr_name` is an empty string then it returns a list containing all
+    attribute names and values as dictionaries.
+    If `attr_name` cannot be found, it raises a `ValueError` exception.
+        plugin_id: int representing the plugin id
+        attr_name: list of attribute names
     """
-    for el in get_plugin_attrs(plugin_id)['attributes']:
-        if el['attribute_name'] == attr_name:
-            return el['attribute_value']
+    try:
+        plugin_attributes = get_plugin_attrs(plugin_id)['attributes']
+    except ValueError:
+        raise ValueError('Incorrect plugin id.')
+    else:
+        if not attr_name:
+            return plugin_attributes
+        for el in plugin_attributes:
+            if el['attribute_name'] == attr_name:
+                return el['attribute_value']
+        raise ValueError('Plugin attribute not found')
+
+
+def get_plugin_output(scan_id, host_id, plugin_id, history_id=None):
+    """
+    Implements the `plugin_output` method of the `scans` resource.
+    Returns the plugin output for a given host, in json format.
+    """
+    resource = 'scans'
+    params = '{}/hosts/{}/plugins/{}'.format(scan_id, host_id, plugin_id)
+
+    r = requests.get(build_url(url, resource, params),
+                     headers=build_headers(), verify=verify)
+
+    if r.status_code == 404:
+        raise ValueError('Scan does not exist.')
+    elif r.status_code == 200:
+        return r.json()
 
 
 def gen_missing_patches(scan_id):
-    """
-    Genetator that returns the missing operating system patch and the IP
-    address for each Windows system found in a given scan.
-    scan_id: the id of the scan to process.
-    """
     scan_details = get_scan_details(scan_id)
 
     for vuln in scan_details['vulnerabilities']:
@@ -538,42 +647,53 @@ def gen_missing_patches(scan_id):
 
 def build_missing_patches_report(scan_ids):
     """
-    Takes a list of scan_ids and builds a defaultdict summarizing the
-    operating system patches missing on the Windows systems found in the scan
+    Takes a list of scan_ids and returns a defaultdict summarizing the
+    operating system patches missing on the Windows systems in the scan
     list.
-    scan_ids: list of scans to process.
+        scan_ids: list of scans to process
     """
-    d = collections.defaultdict(list)
-    scan_patches = collections.defaultdict(list)
-    res = []
-
-    for scan_id in scan_ids:
-        for patch_id, plugin_id, severity, count\
-                in gen_missing_patches(scan_id):
-            d[patch_id] = [plugin_id, severity, patch_id, SEVERITY[severity]]
-            scan_patches[scan_id].append([patch_id, count])
-
-    for patch in d:
-        for scan_id in scan_ids:
-            patches, counts = zip(*scan_patches[scan_id])
-            if patch in patches:
-                i = patches.index(patch)
-                d[patch].extend([counts[i]])
-            else:
-                d[patch].extend([''])
-
-    for k, v in d.items():
+    def prepare_table(scan_ids):
+        d = collections.defaultdict(list)
+        scan_patches = collections.defaultdict(list)
+        res = []
         attr_name = 'patch_publication_date'
-        patch_pub_date = plugin_attrs(v[0], attr_name)
-        v.insert(3, patch_pub_date)
-        res.append(v)
 
+        for scan_id in scan_ids:
+            for patch_id, plugin_id, severity, count\
+                    in gen_missing_patches(scan_id):
+                d[patch_id] = [plugin_id, severity, patch_id,
+                               SEVERITY[severity]]
+                scan_patches[scan_id].append([patch_id, count])
+
+        for patch in d:
+            for scan_id in scan_ids:
+                patches, counts = zip(*scan_patches[scan_id])
+                if patch in patches:
+                    i = patches.index(patch)
+                    d[patch].extend([counts[i]])
+                else:
+                    d[patch].extend([''])
+
+        for k, v in d.items():
+            try:
+                patch_pub_date = plugin_attrs(v[0], attr_name)
+            except ValueError:
+                patch_pub_date = 'N/A'
+
+            if patch_pub_date != 'N/A':
+                patch_pub_date = datetime.strptime(patch_pub_date, '%Y/%m/%d')
+            v.insert(3, patch_pub_date)
+            res.append(v)
+
+        return res
+
+    result = prepare_table(scan_ids)
     headers = ['Patch ID', 'Patch Pub. Date', 'Severity']
     scan_names = [get_scan_details(scan_id)['info']['name']
                   for scan_id in scan_ids]
     headers.extend(scan_names)
 
-    return res, headers
+    return result, headers
 
 
 def print_missing_patches_report(scan_ids):
@@ -583,8 +703,9 @@ def print_missing_patches_report(scan_ids):
     scan_ids: list of scans to process.
     """
     table, headers = build_missing_patches_report(scan_ids)
-    sorted_table = sorted(table, key=itemgetter(1), reverse=True)
-    print(tabulate([el[2:] for el in sorted_table], headers=headers))
+    sorted_by_severity = sorted(table, key=itemgetter(2), reverse=True)
+    sorted_by_date = sorted(sorted_by_severity, key=itemgetter(1), reverse=True)
+    print(tabulate([el[2:] for el in sorted_by_date], headers=headers))
 
 
 if __name__ == '__main__':
